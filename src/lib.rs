@@ -66,11 +66,12 @@ mod vec_mut_handle_core {
             self.vec.get(self.index..)?.get(slice)
         }
 
-        pub fn peek_forward_slice_mut<I>(&self, slice: I) -> Option<&I::Output>
+        #[must_use]
+        pub fn peek_forward_slice_mut<I>(&mut self, slice: I) -> Option<&mut I::Output>
         where
             I: SliceIndex<[T]>,
         {
-            self.vec.get(self.index..)?.get(slice)
+            self.vec.get_mut(self.index..)?.get_mut(slice)
         }
     }
 }
@@ -201,8 +202,8 @@ mod tests {
     fn test_vec_mut_handle_peek_forward_slice_mut() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let handle = VecMutHandle::new(&mut v, 0, &mut index).unwrap();
-        assert_eq!(handle.peek_forward_slice_mut(1..), Some(&[2, 3][..]));
+        let mut handle = VecMutHandle::new(&mut v, 0, &mut index).unwrap();
+        assert_eq!(handle.peek_forward_slice_mut(1..), Some(&mut [2, 3][..]));
     }
 
     #[test]
