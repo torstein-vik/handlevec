@@ -1,32 +1,32 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-/// Core of vector mutations. Attempt to keep small, to have fewer errors. Sealed in it's own module to restrict surface area.
+/// Core of vector mutations. Attempt to keep small, to have guaranteed no panics. Sealed in it's own module to restrict surface area.
 mod vec_mut_handle_core {
     use std::slice::SliceIndex;
 
     #[derive(Debug)]
     pub struct VecMutationHandle<'a, 'b, T> {
         vec: &'a mut Vec<T>,
-        index: usize, // Our code must guarantee that index is ALWAYS smaller than vec.length This means we may not mutate index, or shorten the vec, without consuming ownership of the handle.
+        index: usize,
         next_index: &'b mut usize, // The index for the next iteration. Mutated e.g. when element is removed, so none are skipped.
+                                   // Contract:
+                                   // index < vec.len()
+                                   // next_index >= index
     }
 
     impl<'a, 'b, T> VecMutationHandle<'a, 'b, T> {
-        /// Provides None if index is less than vector length (an invalid handle)
+        /// Provides `None` if index is less than vector length (an invalid handle)
+        /// In case the `index` is valid, `index` is always immediately overwritten with `index + 1` (and a copy of the original value is used inside here), even if no methods are called on the handle.
         #[must_use]
-        pub(crate) fn new(
-            vec: &'a mut Vec<T>,
-            index: usize,
-            next_index: &'b mut usize,
-        ) -> Option<Self> {
-            *next_index = index + 1;
-
-            if index < vec.len() {
+        pub fn new(vec: &'a mut Vec<T>, index: &'b mut usize) -> Option<Self> {
+            let curr_index = *index;
+            if curr_index < vec.len() {
+                *index = curr_index + 1;
                 Some(VecMutationHandle {
                     vec,
-                    index,
-                    next_index,
+                    index: curr_index,
+                    next_index: index,
                 })
             } else {
                 None
@@ -58,8 +58,13 @@ mod vec_mut_handle_core {
             *self.next_index += steps_to_skip;
         }
 
-        pub fn break_loop(&mut self) {
+        pub fn stop_iteration(self) {
             *self.next_index = usize::MAX; // If your vector is larger than usize::MAX, then you have a problem anyway...
+        }
+
+        pub fn discard_and_stop_iteration(self) -> T {
+            *self.next_index = usize::MAX;
+            self.vec.remove(self.index)
         }
 
         #[must_use]
@@ -96,16 +101,8 @@ pub use crate::vec_mut_handle_core::*;
 pub fn mutate_vec_by_handles<T>(vec: &mut Vec<T>, mut op: impl FnMut(VecMutationHandle<T>)) {
     let mut curr_index = 0;
 
-    while curr_index < vec.len() {
-        let mut next_index = curr_index + 1; // This is overridden anyway, but "safety check"
-
-        let handle = VecMutationHandle::new(vec, curr_index, &mut next_index).unwrap(); // We can unwrap because we have checked curr_index < vec.len()
-
+    while let Some(handle) = VecMutationHandle::new(vec, &mut curr_index) {
         op(handle);
-
-        //assert!(next_index >= curr_index);
-
-        curr_index = next_index;
     }
 }
 
@@ -128,7 +125,7 @@ mod tests {
     fn test_vec_mut_handle_new() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let handle = VecMutationHandle::new(&mut v, 0, &mut index);
+        let handle = VecMutationHandle::new(&mut v, &mut index);
         assert!(handle.is_some());
         assert_eq!(handle.unwrap().get(), &1);
     }
@@ -137,7 +134,7 @@ mod tests {
     fn test_vec_mut_handle_set() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let mut handle = VecMutationHandle::new(&mut v, 0, &mut index).unwrap();
+        let mut handle = VecMutationHandle::new(&mut v, &mut index).unwrap();
         handle.set(10);
         assert_eq!(handle.get(), &10);
     }
@@ -146,7 +143,7 @@ mod tests {
     fn test_vec_mut_handle_discard() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let handle = VecMutationHandle::new(&mut v, 0, &mut index).unwrap();
+        let handle = VecMutationHandle::new(&mut v, &mut index).unwrap();
         assert_eq!(handle.discard(), 1);
         assert_eq!(v, vec![2, 3]);
     }
@@ -155,7 +152,7 @@ mod tests {
     fn test_vec_mut_handle_insert_and_process() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let mut handle = VecMutationHandle::new(&mut v, index, &mut index).unwrap();
+        let mut handle = VecMutationHandle::new(&mut v, &mut index).unwrap();
         handle.insert_and_process(10);
         assert_eq!(v, vec![1, 10, 2, 3]);
         assert_eq!(index, 1);
@@ -165,7 +162,7 @@ mod tests {
     fn test_vec_mut_handle_skip_forward() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let mut handle = VecMutationHandle::new(&mut v, 0, &mut index).unwrap();
+        let mut handle = VecMutationHandle::new(&mut v, &mut index).unwrap();
         handle.skip_forward(2);
         assert_eq!(index, 3);
     }
@@ -174,9 +171,9 @@ mod tests {
     fn test_vec_mut_handle_peek_forward_slice() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let handle = VecMutationHandle::new(&mut v, 0, &mut index).unwrap();
+        let handle = VecMutationHandle::new(&mut v, &mut index).unwrap();
         assert_eq!(handle.peek_forward_slice(1..), Some(&[2, 3][..]));
-        let handle_two = VecMutationHandle::new(&mut v, 1, &mut index).unwrap();
+        let handle_two = VecMutationHandle::new(&mut v, &mut index).unwrap();
         assert_eq!(handle_two.peek_forward_slice(1..), Some(&[3][..]));
         assert_eq!(handle_two.peek_forward_slice(2), None);
     }
@@ -185,7 +182,7 @@ mod tests {
     fn test_vec_mut_handle_peek_forward_slice_mut() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let mut handle = VecMutationHandle::new(&mut v, 0, &mut index).unwrap();
+        let mut handle = VecMutationHandle::new(&mut v, &mut index).unwrap();
         assert_eq!(handle.peek_forward_slice_mut(1..), Some(&mut [2, 3][..]));
         handle.peek_forward_slice_mut(1..).unwrap()[1] = 70;
         assert_eq!(v[2], 70);
@@ -194,8 +191,8 @@ mod tests {
     #[test]
     fn test_vec_mut_handle_insert_and_skip() {
         let mut v = vec![1, 2, 3];
-        let mut index = 0;
-        let mut handle = VecMutationHandle::new(&mut v, 1, &mut index).unwrap();
+        let mut index = 1;
+        let mut handle = VecMutationHandle::new(&mut v, &mut index).unwrap();
         handle.insert_and_skip(10);
         assert_eq!(v, vec![1, 2, 10, 3]);
         assert_eq!(index, 3);
@@ -270,14 +267,63 @@ mod tests {
     fn test_mutate_vec_complex_break_loop() {
         let mut my_vec = vec![2, 3, 4, 5, 6, 11, 1, 5, 7];
 
-        my_vec.mutate_vec_by_handles(|mut elem| {
+        my_vec.mutate_vec_by_handles(|elem| {
             if *elem.get() > 10 {
-                elem.break_loop();
+                elem.stop_iteration();
             } else {
                 elem.discard();
             }
         });
 
         assert_eq!(my_vec, vec![11, 1, 5, 7]);
+    }
+
+    #[test]
+    fn test_mutate_vec_function_complex_break_loop() {
+        let mut my_vec = vec![2, 3, 4, 5, 6, 11, 1, 5, 7];
+
+        mutate_vec_by_handles(&mut my_vec, |elem| {
+            if *elem.get() > 10 {
+                elem.stop_iteration();
+            } else {
+                elem.discard();
+            }
+        });
+
+        assert_eq!(my_vec, vec![11, 1, 5, 7]);
+    }
+
+    #[test]
+    fn test_mutate_vec_handrolled_complex_break_loop() {
+        let mut my_vec = vec![2, 3, 4, 5, 6, 11, 1, 5, 7];
+
+        let mut my_index = 0;
+
+        while let Some(elem) = VecMutationHandle::new(&mut my_vec, &mut my_index) {
+            if *elem.get() > 10 {
+                elem.stop_iteration();
+            } else {
+                elem.discard();
+            }
+        }
+
+        assert_eq!(my_vec, vec![11, 1, 5, 7]);
+    }
+
+    #[test]
+    fn test_mutate_vec_handrolled_complex_break_loop_with_final_discard() {
+        let mut my_vec = vec![2, 3, 4, 5, 6, 11, 1, 5, 7];
+
+        let mut my_index = 0;
+
+        while let Some(mut elem) = VecMutationHandle::new(&mut my_vec, &mut my_index) {
+            if *elem.get() > 10 {
+                elem.discard_and_stop_iteration();
+            } else {
+                elem.set(20);
+            }
+        }
+
+        assert_eq!(my_vec, vec![20, 20, 20, 20, 20, 1, 5, 7]);
     }
 }
