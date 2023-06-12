@@ -1,18 +1,27 @@
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
+/// Core of vector mutations. Attempt to keep small, to have fewer errors.
 mod vec_mut_handle_core {
     use std::slice::SliceIndex;
 
-    pub struct VecMutHandle<'a, 'b, T> {
+    #[derive(Debug)]
+    pub struct VecMutationHandle<'a, 'b, T> {
         vec: &'a mut Vec<T>,
-        index: usize,
+        index: usize, // Our code must guarantee that index is ALWAYS smaller than vec.length This means we may not mutate index, or shorten the vec, without consuming ownership of the handle.
         next_index: &'b mut usize, // The index for the next iteration. Mutated e.g. when element is removed, so none are skipped.
     }
 
-    impl<'a, 'b, T> VecMutHandle<'a, 'b, T> {
-        pub fn new(vec: &'a mut Vec<T>, index: usize, next_index: &'b mut usize) -> Option<Self> {
+    impl<'a, 'b, T> VecMutationHandle<'a, 'b, T> {
+        pub(crate) fn new(
+            vec: &'a mut Vec<T>,
+            index: usize,
+            next_index: &'b mut usize,
+        ) -> Option<Self> {
             *next_index = index + 1;
 
             if index < vec.len() {
-                Some(VecMutHandle {
+                Some(VecMutationHandle {
                     vec,
                     index,
                     next_index,
@@ -22,37 +31,23 @@ mod vec_mut_handle_core {
             }
         }
 
-        pub fn get(&self) -> Option<&T> {
-            self.vec.get(self.index)
+        pub fn get(&self) -> &T {
+            self.vec.get(self.index).unwrap() // From the new method, we are always within bounds. The discard method consumes ownership. This is ok.
         }
 
-        pub fn get_mut(&mut self) -> Option<&mut T> {
-            self.vec.get_mut(self.index)
+        pub fn get_mut(&mut self) -> &mut T {
+            self.vec.get_mut(self.index).unwrap() // From the new method, we are always within bounds. The discard method consumes ownership. This is ok.
         }
 
-        pub fn set(&mut self, t: T) -> Option<()> {
-            *self.get_mut()? = t;
-            Some(())
+        /// Consumes self, as the contract is now invalid (index could be larger than or equal to vec length, especially if we repeat.)
+        pub fn discard(self) -> T {
+            *self.next_index -= 1;
+            self.vec.remove(self.index)
         }
 
-        /// Consumes self, as the "reference" is invalid
-        pub fn discard(self) -> Option<T> {
-            if self.index < self.vec.len() {
-                *self.next_index -= 1;
-                Some(self.vec.remove(self.index))
-            } else {
-                None
-            }
-        }
-
-        pub fn insert_and_process(&mut self, t: T) -> Option<()> {
-            if self.index < self.vec.len() {
-                // This looks weird, accessing index + 1 below. But insert allows the length as an index, inserting after all other elements.
-                self.vec.insert(self.index + 1, t);
-                Some(())
-            } else {
-                None
-            }
+        pub fn insert_and_process(&mut self, t: T) {
+            // This looks weird, accessing index + 1 below. But insert allows the length as an index, inserting after all other elements.
+            self.vec.insert(self.index + 1, t);
         }
 
         pub fn skip_forward(&mut self, steps_to_skip: usize) {
@@ -66,7 +61,6 @@ mod vec_mut_handle_core {
             self.vec.get(self.index..)?.get(slice)
         }
 
-        #[must_use]
         pub fn peek_forward_slice_mut<I>(&mut self, slice: I) -> Option<&mut I::Output>
         where
             I: SliceIndex<[T]>,
@@ -76,36 +70,31 @@ mod vec_mut_handle_core {
     }
 }
 
-impl<'a, 'b, T> VecMutHandle<'a, 'b, T> {
-    pub fn insert_and_skip(&mut self, t: T) -> Option<()> {
-        self.insert_and_process(t)?;
+impl<'a, 'b, T> VecMutationHandle<'a, 'b, T> {
+    pub fn insert_and_skip(&mut self, t: T) {
+        self.insert_and_process(t);
         self.skip_forward(1);
-        Some(())
+    }
+
+    pub fn set(&mut self, t: T) {
+        *self.get_mut() = t;
     }
 }
 
 pub use crate::vec_mut_handle_core::*;
 
-pub trait IntoMutHandles<T>: Sized {
-    fn mutate_vec(self, op: impl FnMut(VecMutHandle<T>)) -> Self;
-    fn mutate_vec_result<E>(
-        self,
-        op: impl FnMut(VecMutHandle<T>) -> Result<(), E>,
-    ) -> Result<Self, E>;
-
-    fn mutate_vec_maybe(self, mut op: impl FnMut(VecMutHandle<T>) -> Option<()>) -> Option<Self> {
-        self.mutate_vec_result::<()>(|t| op(t).ok_or(())).ok()
-    }
+pub trait VecMutateByHandles<T>: Sized {
+    fn mutate_vec(&mut self, op: impl FnMut(VecMutationHandle<T>));
 }
 
-impl<T> IntoMutHandles<T> for Vec<T> {
-    fn mutate_vec(mut self, mut op: impl FnMut(VecMutHandle<T>)) -> Self {
+impl<T> VecMutateByHandles<T> for Vec<T> {
+    fn mutate_vec(&mut self, mut op: impl FnMut(VecMutationHandle<T>)) {
         let mut curr_index = 0;
 
         while curr_index < self.len() {
             let mut next_index = curr_index + 1; // This is overridden anyway, but "safety check"
 
-            let handle = VecMutHandle::new(&mut self, curr_index, &mut next_index).unwrap();
+            let handle = VecMutationHandle::new(self, curr_index, &mut next_index).unwrap();
 
             op(handle);
 
@@ -113,33 +102,10 @@ impl<T> IntoMutHandles<T> for Vec<T> {
 
             curr_index = next_index;
         }
-
-        self
-    }
-
-    fn mutate_vec_result<E>(
-        mut self,
-        mut op: impl FnMut(VecMutHandle<T>) -> Result<(), E>,
-    ) -> Result<Self, E> {
-        let mut curr_index = 0;
-
-        while curr_index < self.len() {
-            let mut next_index = curr_index + 1; // This is overridden anyway, but "safety check"
-
-            let handle = VecMutHandle::new(&mut self, curr_index, &mut next_index).unwrap();
-
-            op(handle)?; // The question mark does a lot of work... maybe a bit silly
-
-            assert!(next_index >= curr_index);
-
-            curr_index = next_index;
-        }
-
-        Ok(self)
     }
 }
 
-/// Generated by chatgpt. Should be reviewed properly, maybe rewritten.
+// Generated by chatgpt, reviewed by human.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,26 +114,26 @@ mod tests {
     fn test_vec_mut_handle_new() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let handle = VecMutHandle::new(&mut v, 0, &mut index);
+        let handle = VecMutationHandle::new(&mut v, 0, &mut index);
         assert!(handle.is_some());
-        assert_eq!(handle.unwrap().get(), Some(&1));
+        assert_eq!(handle.unwrap().get(), &1);
     }
 
     #[test]
     fn test_vec_mut_handle_set() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let mut handle = VecMutHandle::new(&mut v, 0, &mut index).unwrap();
-        assert_eq!(handle.set(10), Some(()));
-        assert_eq!(handle.get(), Some(&10));
+        let mut handle = VecMutationHandle::new(&mut v, 0, &mut index).unwrap();
+        handle.set(10);
+        assert_eq!(handle.get(), &10);
     }
 
     #[test]
     fn test_vec_mut_handle_discard() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let handle = VecMutHandle::new(&mut v, 0, &mut index).unwrap();
-        assert_eq!(handle.discard(), Some(1));
+        let handle = VecMutationHandle::new(&mut v, 0, &mut index).unwrap();
+        assert_eq!(handle.discard(), 1);
         assert_eq!(v, vec![2, 3]);
     }
 
@@ -175,8 +141,8 @@ mod tests {
     fn test_vec_mut_handle_insert_and_process() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let mut handle = VecMutHandle::new(&mut v, index, &mut index).unwrap();
-        assert_eq!(handle.insert_and_process(10), Some(()));
+        let mut handle = VecMutationHandle::new(&mut v, index, &mut index).unwrap();
+        handle.insert_and_process(10);
         assert_eq!(v, vec![1, 10, 2, 3]);
         assert_eq!(index, 1);
     }
@@ -185,7 +151,7 @@ mod tests {
     fn test_vec_mut_handle_skip_forward() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let mut handle = VecMutHandle::new(&mut v, 0, &mut index).unwrap();
+        let mut handle = VecMutationHandle::new(&mut v, 0, &mut index).unwrap();
         handle.skip_forward(2);
         assert_eq!(index, 3);
     }
@@ -194,95 +160,56 @@ mod tests {
     fn test_vec_mut_handle_peek_forward_slice() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let handle = VecMutHandle::new(&mut v, 0, &mut index).unwrap();
+        let handle = VecMutationHandle::new(&mut v, 0, &mut index).unwrap();
         assert_eq!(handle.peek_forward_slice(1..), Some(&[2, 3][..]));
+        let handle_two = VecMutationHandle::new(&mut v, 1, &mut index).unwrap();
+        assert_eq!(handle_two.peek_forward_slice(1..), Some(&[3][..]));
+        assert_eq!(handle_two.peek_forward_slice(2), None);
     }
 
     #[test]
     fn test_vec_mut_handle_peek_forward_slice_mut() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let mut handle = VecMutHandle::new(&mut v, 0, &mut index).unwrap();
+        let mut handle = VecMutationHandle::new(&mut v, 0, &mut index).unwrap();
         assert_eq!(handle.peek_forward_slice_mut(1..), Some(&mut [2, 3][..]));
+        handle.peek_forward_slice_mut(1..).unwrap()[1] = 70;
+        assert_eq!(v[2], 70);
     }
 
     #[test]
     fn test_vec_mut_handle_insert_and_skip() {
         let mut v = vec![1, 2, 3];
         let mut index = 0;
-        let mut handle = VecMutHandle::new(&mut v, index, &mut index).unwrap();
-        assert_eq!(handle.insert_and_skip(10), Some(()));
-        assert_eq!(v, vec![1, 10, 2, 3]);
-        assert_eq!(index, 2);
+        let mut handle = VecMutationHandle::new(&mut v, 1, &mut index).unwrap();
+        handle.insert_and_skip(10);
+        assert_eq!(v, vec![1, 2, 10, 3]);
+        assert_eq!(index, 3);
     }
 
     #[test]
-    fn test_into_mut_handles_mutate_vec_simple() {
-        let v = vec![1, 2, 3];
-        let v = v.mutate_vec(|mut handle| {
+    fn test_mutate_vec_mutate_vec_set() {
+        let mut v = vec![1, 2, 3];
+        v.mutate_vec(|mut handle| {
             handle.set(10);
         });
         assert_eq!(v, vec![10, 10, 10]);
     }
 
     #[test]
-    fn test_into_mut_handles_mutate_vec_result_simple() {
-        let v = vec![1, 2, 3];
-        let result: Result<Vec<i32>, Option<()>> = v.mutate_vec_result(|mut handle| {
-            handle.set(10);
-            Ok(())
-        });
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), vec![10, 10, 10]);
-    }
-
-    #[test]
-    fn test_into_mut_handles_mutate_vec_maybe_simple() {
-        let v = vec![1, 2, 3];
-        let v = v.mutate_vec_maybe(|mut handle| {
-            handle.set(10);
-            Some(())
-        });
-        assert!(v.is_some());
-        assert_eq!(v.unwrap(), vec![10, 10, 10]);
-    }
-
-    #[test]
-    fn test_into_mut_handles_mutate_vec() {
-        let v = vec![1, 2, 3];
-        let v = v.mutate_vec(|mut handle| {
+    fn test_mutate_vec_mutate_vec_insert() {
+        let mut v = vec![1, 2, 3];
+        v.mutate_vec(|mut handle| {
             handle.insert_and_skip(10);
         });
         assert_eq!(v, vec![1, 10, 2, 10, 3, 10]);
     }
 
     #[test]
-    fn test_into_mut_handles_mutate_vec_result() {
-        let v = vec![1, 2, 3];
-        let result: Result<Vec<i32>, ()> = v.mutate_vec_result(|mut handle| {
-            handle.insert_and_skip(10);
-            Ok(())
-        });
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), vec![1, 10, 2, 10, 3, 10]);
-    }
-
-    #[test]
-    fn test_into_mut_handles_mutate_vec_maybe() {
-        let v = vec![1, 2, 3];
-        let v = v.mutate_vec_maybe(|mut handle| {
-            handle.insert_and_skip(10);
-            Some(())
-        });
-        assert!(v.is_some());
-        assert_eq!(v.unwrap(), vec![1, 10, 2, 10, 3, 10]);
-    }
-
-    #[test]
     fn test_mutate_vec_complex_insertion_and_deletion() {
-        let v = vec![1, 2, 3, 4, 5];
-        let v = v.mutate_vec(|mut handle| {
-            if handle.get() == Some(&3) {
+        let mut v = vec![1, 2, 3, 4, 5];
+        v.mutate_vec(|mut handle| {
+            if *handle.get() == 3 {
                 handle.insert_and_skip(100);
                 handle.discard();
             }
@@ -292,9 +219,9 @@ mod tests {
 
     #[test]
     fn test_mutate_vec_complex_insertion_and_modification() {
-        let v = vec![1, 2, 3, 4, 5];
-        let v = v.mutate_vec(|mut handle| {
-            if handle.get() == Some(&3) {
+        let mut v = vec![1, 2, 3, 4, 5];
+        v.mutate_vec(|mut handle| {
+            if *handle.get() == 3 {
                 handle.insert_and_skip(100);
                 handle.set(50);
             }
@@ -303,30 +230,25 @@ mod tests {
     }
 
     #[test]
-    fn test_mutate_vec_result_failure() {
-        let v = vec![1, 2, 3, 4, 5];
-        let result = v.mutate_vec_result(|mut handle| {
-            if handle.get() == Some(&3) {
-                Err("Found a 3!")
-            } else {
-                handle.set(0);
-                Ok(())
-            }
-        });
-        assert!(result.is_err());
-    }
+    fn test_mutate_vec_complex_peeks_and_state_insert_process() {
+        let mut my_vec = vec![2, 3, 4, 5, 6, 7, 1];
+        let mut my_count = 0;
 
-    #[test]
-    fn test_mutate_vec_maybe_none() {
-        let v = vec![1, 2, 3, 4, 5];
-        let v = v.mutate_vec_maybe(|mut handle| {
-            if handle.get() == Some(&3) {
-                None
-            } else {
-                handle.set(0);
-                Some(())
+        my_vec.mutate_vec(|mut elem| {
+            let val = *elem.get();
+            my_count += val;
+
+            if val > 6 {
+                elem.discard();
+            } else if val < 3 {
+                let x = elem.peek_forward_slice(0..).unwrap().len();
+                elem.set(x);
+            } else if val == 4 {
+                elem.insert_and_process(7);
             }
         });
-        assert!(v.is_none());
+
+        assert_eq!(my_count, 35);
+        assert_eq!(my_vec, vec![7, 3, 4, 5, 6, 1]);
     }
 }
