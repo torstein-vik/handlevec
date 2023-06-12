@@ -7,7 +7,7 @@ fn main() {
 
     println!("{:?}", my_vec);
 
-    my_vec.mutate_vec(|mut elem| {
+    my_vec.mutate_vec_by_handles(|mut elem| {
         let val = *elem.get();
         my_count += val;
 
