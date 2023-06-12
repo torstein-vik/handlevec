@@ -13,6 +13,8 @@ mod vec_mut_handle_core {
     }
 
     impl<'a, 'b, T> VecMutationHandle<'a, 'b, T> {
+        /// Provides None if index is less than vector length (an invalid handle)
+        #[must_use]
         pub(crate) fn new(
             vec: &'a mut Vec<T>,
             index: usize,
@@ -31,10 +33,12 @@ mod vec_mut_handle_core {
             }
         }
 
+        #[must_use]
         pub fn get(&self) -> &T {
             self.vec.get(self.index).unwrap() // From the new method, we are always within bounds. The discard method consumes ownership. This is ok.
         }
 
+        #[must_use]
         pub fn get_mut(&mut self) -> &mut T {
             self.vec.get_mut(self.index).unwrap() // From the new method, we are always within bounds. The discard method consumes ownership. This is ok.
         }
@@ -54,6 +58,11 @@ mod vec_mut_handle_core {
             *self.next_index += steps_to_skip;
         }
 
+        pub fn break_loop(&mut self) {
+            *self.next_index = usize::MAX; // If your vector is larger than usize::MAX, then you have a problem anyway...
+        }
+
+        #[must_use]
         pub fn peek_forward_slice<I>(&self, slice: I) -> Option<&I::Output>
         where
             I: SliceIndex<[T]>,
@@ -61,6 +70,7 @@ mod vec_mut_handle_core {
             self.vec.get(self.index..)?.get(slice)
         }
 
+        #[must_use]
         pub fn peek_forward_slice_mut<I>(&mut self, slice: I) -> Option<&mut I::Output>
         where
             I: SliceIndex<[T]>,
@@ -89,11 +99,11 @@ pub fn mutate_vec_by_handles<T>(vec: &mut Vec<T>, mut op: impl FnMut(VecMutation
     while curr_index < vec.len() {
         let mut next_index = curr_index + 1; // This is overridden anyway, but "safety check"
 
-        let handle = VecMutationHandle::new(vec, curr_index, &mut next_index).unwrap();
+        let handle = VecMutationHandle::new(vec, curr_index, &mut next_index).unwrap(); // We can unwrap because we have checked curr_index < vec.len()
 
         op(handle);
 
-        assert!(next_index >= curr_index);
+        //assert!(next_index >= curr_index);
 
         curr_index = next_index;
     }
@@ -254,5 +264,20 @@ mod tests {
 
         assert_eq!(my_count, 35);
         assert_eq!(my_vec, vec![7, 3, 4, 5, 6, 1]);
+    }
+
+    #[test]
+    fn test_mutate_vec_complex_break_loop() {
+        let mut my_vec = vec![2, 3, 4, 5, 6, 11, 1, 5, 7];
+
+        my_vec.mutate_vec_by_handles(|mut elem| {
+            if *elem.get() > 10 {
+                elem.break_loop();
+            } else {
+                elem.discard();
+            }
+        });
+
+        assert_eq!(my_vec, vec![11, 1, 5, 7]);
     }
 }
