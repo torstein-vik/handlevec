@@ -6,7 +6,7 @@ description = "Small abstraction over index-style iteration over a vector, with 
 repository = "https://github.com/torstein-vik/handlevec"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
-keywords = ["iteration", "vectors", "index-style-iteration"]
+keywords = ["iteration", "vectors", "index-iteration"]
 categories = ["rust-patterns"]
 
 [dependencies]
