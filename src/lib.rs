@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 #![warn(missing_docs)]
+#![warn(clippy::cargo)]
 
 //! Small abstraction over index-style iteration over a vector, with deletion, insertion, and other operations on the vector while iterating.
 //! Hopefully, less bug-prone and headache-prone than manually considering index updates.

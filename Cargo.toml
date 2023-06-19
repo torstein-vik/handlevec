@@ -2,7 +2,11 @@
 name = "handlevec"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "Small abstraction over index-style iteration over a vector, with deletion, insertion, and other operations on the vector while iterating."
+repository = "https://github.com/torstein-vik/handlevec"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["iteration", "vectors", "index-style-iteration"]
+categories = ["rust-patterns"]
 
 [dependencies]
